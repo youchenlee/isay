@@ -16,7 +16,7 @@ struct Transcriber: Sendable {
             && files.isReadableFile(atPath: model.path) && files.isReadableFile(atPath: vad.path)
     }
 
-    func transcribe(_ audio: URL, onPrompt: @Sendable (Vocabulary.Prompt) -> Void) throws -> String {
+    func transcribe(_ audio: URL, context: String, onPrompt: @Sendable (Vocabulary.Prompt) -> Void) throws -> String {
         let folder = audio.deletingLastPathComponent()
         let output = folder.appendingPathComponent("whisper")
         let entries: String
@@ -26,7 +26,7 @@ struct Transcriber: Sendable {
         let raw = output.appendingPathExtension("txt")
         let traditional = folder.appendingPathComponent("traditional.txt")
 
-        let prompt = selectPrompt(vocabulary)
+        let prompt = selectPrompt(vocabulary, context: context)
         try run(whisper, ["-m", model.path, "-f", audio.path, "-l", "zh", "--prompt", prompt.text,
                           "--vad", "-vm", vad.path, "-otxt", "-of", output.path, "-np"],
                 timeout: 30, failure: "語音辨識失敗，請再試一次。",
@@ -44,12 +44,13 @@ struct Transcriber: Sendable {
         return punctuateTranscript(vocabulary.correct(singleLine))
     }
 
-    /// 用 App 內附的 isay-prompt 依 Whisper 分詞器挑詞；失敗時退回保守的位元組估計。
-    private func selectPrompt(_ vocabulary: Vocabulary) -> Vocabulary.Prompt {
+    /// 用 App 內附的 isay-prompt 依 Whisper 分詞器挑詞，並確認游標前文字放得進；
+    /// 失敗時退回保守的位元組估計，且不帶游標前文字。
+    private func selectPrompt(_ vocabulary: Vocabulary, context: String) -> Vocabulary.Prompt {
         let candidates = vocabulary.candidates
         let ggml = whisper.deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("opt/ggml/libexec")
-        guard !candidates.isEmpty,
+        guard !(candidates.isEmpty && context.isEmpty),
               let selector = Bundle.main.url(forAuxiliaryExecutable: "isay-prompt") else {
             return vocabulary.prompt(hints: vocabulary.fallbackHints, fitsModel: false)
         }
@@ -66,7 +67,7 @@ struct Transcriber: Sendable {
             return vocabulary.prompt(hints: vocabulary.fallbackHints, fitsModel: false)
         }
         DispatchQueue.global().asyncAfter(deadline: .now() + 5) { if process.isRunning { process.terminate() } }
-        input.fileHandleForWriting.write(Data((candidates.joined(separator: "\n") + "\n").utf8))
+        input.fileHandleForWriting.write(Data((([context] + candidates).joined(separator: "\n") + "\n").utf8))
         try? input.fileHandleForWriting.close()
         let data = output.fileHandleForReading.readDataToEndOfFile()
         guard exited.wait(timeout: .now() + 1) == .success,
@@ -74,8 +75,13 @@ struct Transcriber: Sendable {
             if process.isRunning { process.terminate() }
             return vocabulary.prompt(hints: vocabulary.fallbackHints, fitsModel: false)
         }
-        let hints = String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init)
-        return vocabulary.prompt(hints: hints, fitsModel: true)
+        var lines = String(decoding: data, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        guard let first = lines.first, first == "0" || first == "1" else {
+            return vocabulary.prompt(hints: vocabulary.fallbackHints, fitsModel: false)
+        }
+        lines.removeFirst()
+        return vocabulary.prompt(hints: lines.filter { !$0.isEmpty }, context: first == "1" ? context : "", fitsModel: true)
     }
 
     func run(_ executable: URL, _ arguments: [String], timeout: Double, failure: String,

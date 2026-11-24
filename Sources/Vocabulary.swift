@@ -33,12 +33,14 @@ struct Vocabulary {
 
     struct Prompt: Sendable {
         let hints: [String]
+        /// 游標前文字；只有確認放得進模型上限時才會帶入。
+        let context: String
         let total: Int
         let replacementCount: Int
         /// true：已用 Whisper 的分詞器確認整段提示放得進模型上限。
         let fitsModel: Bool
 
-        var text: String { hints.isEmpty ? "" : hints.joined(separator: "、") + "。" }
+        var text: String { hints.isEmpty ? context : hints.joined(separator: "、") + "。" + context }
     }
 
     /// 去重後的提示詞，依詞庫順序排列。
@@ -47,8 +49,9 @@ struct Vocabulary {
         return terms.filter { seen.insert($0).inserted }
     }
 
-    func prompt(hints: [String], fitsModel: Bool) -> Prompt {
-        Prompt(hints: hints, total: candidates.count, replacementCount: replacements.count, fitsModel: fitsModel)
+    func prompt(hints: [String], context: String = "", fitsModel: Bool) -> Prompt {
+        Prompt(hints: hints, context: context, total: candidates.count,
+               replacementCount: replacements.count, fitsModel: fitsModel)
     }
 
     /// 無法用 tokenizer 核對時的保守估計。Whisper 只保留提示的最後一段，超出時丟的是開頭的高優先詞。

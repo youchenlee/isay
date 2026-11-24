@@ -16,6 +16,7 @@ struct PasteTarget {
         guard AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &value) == .success,
               let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
         let element = value as! AXUIElement
+        AXUIElementSetMessagingTimeout(element, 0.1)
         var subrole: CFTypeRef?
         AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole)
         return Self(pid: pid, element: element, isSecure: (subrole as? String) == kAXSecureTextFieldSubrole)
@@ -24,6 +25,49 @@ struct PasteTarget {
     func stillFocused() -> Bool {
         guard let focused = Self.current() else { return false }
         return focused.pid == pid && !focused.isSecure && CFEqual(focused.element, element)
+    }
+
+    /// 游標（或選取範圍開頭）在輸入框中的位置，以 UTF-16 計算。
+    func selectionLocation() -> Int? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        var range = CFRange()
+        guard AXValueGetValue(value as! AXValue, .cfRange, &range) else { return nil }
+        return range.location
+    }
+
+    /// 讀取輸入框中從 `start` 開始、最多 `length` 個 UTF-16 單位的文字。只讀需要的範圍。
+    func text(from start: Int, length: Int) -> String? {
+        guard !isSecure, start >= 0, length > 0 else { return nil }
+        var count: CFTypeRef?
+        var total = Int.max
+        if AXUIElementCopyAttributeValue(element, kAXNumberOfCharactersAttribute as CFString, &count) == .success,
+           let number = count as? Int { total = number }
+        let available = min(length, total - start)
+        guard available > 0 else { return nil }
+        var range = CFRange(location: start, length: available)
+        if let parameter = AXValueCreate(.cfRange, &range) {
+            var result: CFTypeRef?
+            if AXUIElementCopyParameterizedAttributeValue(
+                element, kAXStringForRangeParameterizedAttribute as CFString, parameter, &result) == .success,
+               let string = result as? String { return string }
+        }
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success,
+              let full = value as? String else { return nil }
+        let whole = full as NSString
+        guard start < whole.length else { return nil }
+        return whole.substring(with: NSRange(location: start, length: min(available, whole.length - start)))
+    }
+
+    /// 游標前最多 `limit` 個字，空白與換行併成一個空格；讀不到時回傳空字串。
+    func textBeforeCursor(limit: Int) -> String {
+        guard !isSecure, let end = selectionLocation(), end > 0 else { return "" }
+        let start = max(0, end - limit * 2)
+        guard let raw = text(from: start, length: end - start) else { return "" }
+        let flat = raw.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return String(flat.suffix(limit))
     }
 
     enum Insertion { case inserted, typed, unavailable(String), unconfirmed }

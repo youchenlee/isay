@@ -60,12 +60,12 @@
 
   <path class="arrow" d="M450 264 V328"/>
   <rect class="box" x="230" y="330" width="440" height="40" rx="8"/>
-  <text class="main" x="450" y="355" text-anchor="middle">讀取詞庫 ~/.config/isay/詞庫.txt</text>
+  <text class="main" x="450" y="355" text-anchor="middle">讀取詞庫，帶入游標前最多 80 字</text>
 
   <path class="arrow" d="M450 370 V390"/>
   <rect class="box" x="230" y="392" width="440" height="56" rx="8"/>
   <text class="main" x="450" y="415" text-anchor="middle">isay-prompt 依 Whisper 分詞器挑提示詞</text>
-  <text class="sub" x="450" y="436" text-anchor="middle">從最前面挑到約 220 token 為止；無法計算時改用保守估計</text>
+  <text class="sub" x="450" y="436" text-anchor="middle">游標前文字優先，再從詞庫最前面挑，共約 220 token</text>
 
   <path class="arrow" d="M450 448 V468"/>
   <rect class="box" x="230" y="470" width="440" height="56" rx="8"/>
@@ -138,7 +138,7 @@
   <path class="arrow" d="M450 1090 V1112"/>
   <rect class="done" x="230" y="1114" width="440" height="60" rx="8"/>
   <text class="main" x="450" y="1138" text-anchor="middle">文字出現在原本的輸入框</text>
-  <text class="sub" x="450" y="1160" text-anchor="middle">不按 Enter、不動剪貼簿</text>
+  <text class="sub" x="450" y="1160" text-anchor="middle">不按 Enter、不動剪貼簿；之後改字，iSay 會提議加入詞庫</text>
 
   <text class="sub" x="450" y="1240" text-anchor="middle">iSay 本身不連網；錄音、辨識、轉換都在本機進行。</text>
 </svg>

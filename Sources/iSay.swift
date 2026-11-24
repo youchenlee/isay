@@ -11,6 +11,15 @@ final class ISay: NSObject, NSApplicationDelegate {
         let folder: URL
         let target: PasteTarget?
         let deadline: TimeInterval
+        let context: String
+    }
+
+    private struct CorrectionWatch {
+        let text: String
+        let target: PasteTarget
+        let start: Int
+        var polls = 0
+        var lastSeen: String?
     }
 
     private enum State { case idle, recording(Capture), recognizing(URL) }
@@ -22,6 +31,13 @@ final class ISay: NSObject, NSApplicationDelegate {
     private let hintLine = NSMenuItem(title: "提示詞：尚未送出", action: nil, keyEquivalent: "")
     private let copyLine = NSMenuItem(title: "複製上次辨識文字", action: #selector(copyTranscript), keyEquivalent: "")
     private let loginLine = NSMenuItem(title: "登入時啟動", action: #selector(toggleLogin), keyEquivalent: "")
+    private let contextLine = NSMenuItem(title: "參考游標前文字", action: #selector(toggleContext), keyEquivalent: "")
+    private let learnLine = NSMenuItem(title: "", action: #selector(addSuggestion), keyEquivalent: "")
+    private var correctionWatch: CorrectionWatch?
+    private var correctionTimer: Timer?
+    private var suggestion: LearnedCorrection?
+    private static let contextKey = "useCursorContext"
+    private var usesContext: Bool { UserDefaults.standard.object(forKey: Self.contextKey) as? Bool ?? true }
     private var lastTranscript: String?
     private var mayType = false
     private var pendingInput: (String, PasteTarget)?
@@ -50,6 +66,12 @@ final class ISay: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(hintLine)
         menu.addItem(withTitle: "編輯詞庫…", action: #selector(editVocabulary), keyEquivalent: "").target = self
+        contextLine.target = self
+        contextLine.state = usesContext ? .on : .off
+        menu.addItem(contextLine)
+        learnLine.target = self
+        learnLine.isHidden = true
+        menu.addItem(learnLine)
         copyLine.target = self
         copyLine.isHidden = true
         menu.addItem(copyLine)
@@ -248,13 +270,15 @@ final class ISay: NSObject, NSApplicationDelegate {
         case .none: break
         case .start:
             guard case .idle = state else { return }
+            stopWatchingCorrections()
             let target = PasteTarget.current()
             guard target?.isSecure != true else {
                 show("密碼欄位不開啟錄音", icon: "mic.slash")
                 return
             }
+            let context = usesContext ? target?.textBeforeCursor(limit: 80) ?? "" : ""
             startTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
-                MainActor.assumeIsolated { self?.startRecording(target: target) }
+                MainActor.assumeIsolated { self?.startRecording(target: target, context: context) }
             }
         case .finish: endRecording(.release)
         case .cancel:
@@ -268,7 +292,7 @@ final class ISay: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func startRecording(target: PasteTarget?) {
+    private func startRecording(target: PasteTarget?, context: String) {
         guard case .idle = state else { return }
         guard target?.stillFocused() != false else {
             show("輸入位置已改變，請再按右 ⌘", icon: "mic.slash")
@@ -289,7 +313,7 @@ final class ISay: NSObject, NSApplicationDelegate {
             let limit: TimeInterval = 60
             let deadline = ProcessInfo.processInfo.systemUptime + limit
             guard recorder.record(forDuration: limit) else { throw SpeechError(message: "無法錄音，請確認麥克風。") }
-            state = .recording(Capture(recorder: recorder, folder: folder, target: target, deadline: deadline))
+            state = .recording(Capture(recorder: recorder, folder: folder, target: target, deadline: deadline, context: context))
             show("正在錄音，放開右 ⌘ 辨識，Esc 取消", icon: "mic.fill")
             feedback.show("正在錄音 · 放開右 ⌘ · Esc 取消")
             recordingTimer = Timer.scheduledTimer(withTimeInterval: limit, repeats: false) { [weak self] _ in
@@ -326,11 +350,12 @@ final class ISay: NSObject, NSApplicationDelegate {
         let folder = capture.folder
         let audio = capture.recorder.url
         let target = capture.target
+        let context = capture.context
         let tools = tools
         let app = self
         DispatchQueue.global(qos: .userInitiated).async {
             let result = Result {
-                try tools.transcribe(audio) { prompt in
+                try tools.transcribe(audio, context: context) { prompt in
                     DispatchQueue.main.async { app.showPrompt(prompt) }
                 }
             }
@@ -344,6 +369,8 @@ final class ISay: NSObject, NSApplicationDelegate {
         let note = prompt.fitsModel ? "已依 Whisper 長度上限挑選，全部會被讀入" : "未能核對長度，Whisper 可能截掉部分提示詞"
         details.addItem(NSMenuItem(title: note, action: nil, keyEquivalent: ""))
         details.addItem(NSMenuItem(title: "辨識後替換：\(prompt.replacementCount) 條，不佔提示空間", action: nil, keyEquivalent: ""))
+        let contextNote = prompt.context.isEmpty ? "未使用游標前文字" : "游標前文字：\(prompt.context.count) 字，只用於這次辨識"
+        details.addItem(NSMenuItem(title: contextNote, action: nil, keyEquivalent: ""))
         details.addItem(.separator())
         if prompt.hints.isEmpty {
             details.addItem(NSMenuItem(title: "沒有送出提示詞", action: nil, keyEquivalent: ""))
@@ -385,13 +412,16 @@ final class ISay: NSObject, NSApplicationDelegate {
     }
 
     private func insert(_ text: String, into target: PasteTarget?) {
+        let start = target?.selectionLocation()
         switch target?.insert(text, allowKeyboardInput: mayType) ?? .unavailable("錄音開始時找不到原輸入框") {
         case .inserted:
             show("已輸入文字")
             feedback.show("已輸入", duration: 0.9)
+            if let target, let start { watchCorrections(of: text, in: target, from: start) }
         case .typed:
             show("已送出文字，未按 Enter")
             feedback.show("已送出文字 · 未按 Enter", duration: 1.2)
+            if let target, let start { watchCorrections(of: text, in: target, from: start) }
         case let .unavailable(reason):
             show("\(reason)，可從選單複製上次辨識文字")
             feedback.show("未自動輸入 · 可從選單複製", duration: 2.5)
@@ -407,5 +437,80 @@ final class ISay: NSObject, NSApplicationDelegate {
         board.clearContents()
         if board.setString(lastTranscript, forType: .string) { show("已複製上次辨識文字") }
         else { show("無法複製辨識文字", icon: "exclamationmark.circle") }
+    }
+
+    @objc private func toggleContext() {
+        UserDefaults.standard.set(!usesContext, forKey: Self.contextKey)
+        contextLine.state = usesContext ? .on : .off
+    }
+
+    /// 輸入後 60 秒內，每 2 秒讀回剛輸入的那段文字；使用者改過且停手後，提議加入詞庫。
+    private func watchCorrections(of text: String, in target: PasteTarget, from start: Int) {
+        stopWatchingCorrections()
+        correctionWatch = CorrectionWatch(text: text, target: target, start: start)
+        correctionTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.pollCorrection() }
+        }
+    }
+
+    private func pollCorrection() {
+        guard var watch = correctionWatch else { return stopWatchingCorrections() }
+        watch.polls += 1
+        guard watch.polls <= 30,
+              let edited = watch.target.text(from: watch.start, length: watch.text.utf16.count + 24) else {
+            return stopWatchingCorrections()
+        }
+        if edited.hasPrefix(watch.text) {
+            watch.lastSeen = nil
+        } else if edited == watch.lastSeen {
+            stopWatchingCorrections()
+            if let correction = learnedCorrection(original: watch.text, edited: edited) { offer(correction) }
+            return
+        } else {
+            watch.lastSeen = edited
+        }
+        correctionWatch = watch
+    }
+
+    private func stopWatchingCorrections() {
+        correctionTimer?.invalidate()
+        correctionTimer = nil
+        correctionWatch = nil
+    }
+
+    private func offer(_ correction: LearnedCorrection) {
+        suggestion = correction
+        learnLine.title = "加入詞庫：\(correction.rule)"
+        learnLine.isHidden = false
+        feedback.show("發現修正：\(correction.wrong) → \(correction.right) · 可從選單加入詞庫", duration: 4)
+    }
+
+    @objc private func addSuggestion() {
+        guard let suggestion else { return }
+        self.suggestion = nil
+        learnLine.isHidden = true
+        let file = tools.vocabularyFile
+        do {
+            try FileManager.default.createDirectory(at: tools.directory, withIntermediateDirectories: true)
+            let existing: String
+            do { existing = try String(contentsOf: file, encoding: .utf8) }
+            catch CocoaError.fileReadNoSuchFile { existing = "" }
+            let present = existing.split(whereSeparator: \.isNewline)
+                .contains { $0.trimmingCharacters(in: .whitespaces) == suggestion.rule }
+            if !present {
+                let addition = (existing.isEmpty || existing.hasSuffix("\n") ? "" : "\n") + suggestion.rule + "\n"
+                if existing.isEmpty {
+                    try (Vocabulary.starter + addition).write(to: file, atomically: true, encoding: .utf8)
+                } else {
+                    let handle = try FileHandle(forWritingTo: file)
+                    defer { try? handle.close() }
+                    try handle.seekToEnd()
+                    try handle.write(contentsOf: Data(addition.utf8))
+                }
+            }
+            show("已加入詞庫：\(suggestion.rule)")
+        } catch {
+            show("無法寫入詞庫：\(error.localizedDescription)", icon: "exclamationmark.circle")
+        }
     }
 }
