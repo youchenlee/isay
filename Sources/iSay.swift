@@ -31,7 +31,7 @@ final class ISay: NSObject, NSApplicationDelegate {
     private let hintLine = NSMenuItem(title: "提示詞：尚未送出", action: nil, keyEquivalent: "")
     private let copyLine = NSMenuItem(title: "複製上次辨識文字", action: #selector(copyTranscript), keyEquivalent: "")
     private let loginLine = NSMenuItem(title: "登入時啟動", action: #selector(toggleLogin), keyEquivalent: "")
-    private let contextLine = NSMenuItem(title: "參考游標前文字", action: #selector(toggleContext), keyEquivalent: "")
+    private let contextLine = NSMenuItem(title: "讀取輸入框文字（提示與學詞）", action: #selector(toggleContext), keyEquivalent: "")
     private let learnLine = NSMenuItem(title: "", action: #selector(addSuggestion), keyEquivalent: "")
     private var correctionWatch: CorrectionWatch?
     private var correctionTimer: Timer?
@@ -417,11 +417,11 @@ final class ISay: NSObject, NSApplicationDelegate {
         case .inserted:
             show("已輸入文字")
             feedback.show("已輸入", duration: 0.9)
-            if let target, let start { watchCorrections(of: text, in: target, from: start) }
+            if usesContext, let target, let start { watchCorrections(of: text, in: target, from: start) }
         case .typed:
             show("已送出文字，未按 Enter")
             feedback.show("已送出文字 · 未按 Enter", duration: 1.2)
-            if let target, let start { watchCorrections(of: text, in: target, from: start) }
+            if usesContext, let target, let start { watchCorrections(of: text, in: target, from: start) }
         case let .unavailable(reason):
             show("\(reason)，可從選單複製上次辨識文字")
             feedback.show("未自動輸入 · 可從選單複製", duration: 2.5)
@@ -442,9 +442,11 @@ final class ISay: NSObject, NSApplicationDelegate {
     @objc private func toggleContext() {
         UserDefaults.standard.set(!usesContext, forKey: Self.contextKey)
         contextLine.state = usesContext ? .on : .off
+        if !usesContext { stopWatchingCorrections() }
     }
 
     /// 輸入後 60 秒內，每 2 秒讀回剛輸入的那段文字；使用者改過且停手後，提議加入詞庫。
+    /// 每次讀取前都確認仍是同一個輸入框、不在安全輸入中；焦點一離開就停止。
     private func watchCorrections(of text: String, in target: PasteTarget, from start: Int) {
         stopWatchingCorrections()
         correctionWatch = CorrectionWatch(text: text, target: target, start: start)
@@ -456,7 +458,7 @@ final class ISay: NSObject, NSApplicationDelegate {
     private func pollCorrection() {
         guard var watch = correctionWatch else { return stopWatchingCorrections() }
         watch.polls += 1
-        guard watch.polls <= 30,
+        guard watch.polls <= 30, usesContext, watch.target.stillFocused(),
               let edited = watch.target.text(from: watch.start, length: watch.text.utf16.count + 24) else {
             return stopWatchingCorrections()
         }
@@ -489,25 +491,8 @@ final class ISay: NSObject, NSApplicationDelegate {
         guard let suggestion else { return }
         self.suggestion = nil
         learnLine.isHidden = true
-        let file = tools.vocabularyFile
         do {
-            try FileManager.default.createDirectory(at: tools.directory, withIntermediateDirectories: true)
-            let existing: String
-            do { existing = try String(contentsOf: file, encoding: .utf8) }
-            catch CocoaError.fileReadNoSuchFile { existing = "" }
-            let present = existing.split(whereSeparator: \.isNewline)
-                .contains { $0.trimmingCharacters(in: .whitespaces) == suggestion.rule }
-            if !present {
-                let addition = (existing.isEmpty || existing.hasSuffix("\n") ? "" : "\n") + suggestion.rule + "\n"
-                if existing.isEmpty {
-                    try (Vocabulary.starter + addition).write(to: file, atomically: true, encoding: .utf8)
-                } else {
-                    let handle = try FileHandle(forWritingTo: file)
-                    defer { try? handle.close() }
-                    try handle.seekToEnd()
-                    try handle.write(contentsOf: Data(addition.utf8))
-                }
-            }
+            try Vocabulary.append(rule: suggestion.rule, to: tools.vocabularyFile)
             show("已加入詞庫：\(suggestion.rule)")
         } catch {
             show("無法寫入詞庫：\(error.localizedDescription)", icon: "exclamationmark.circle")

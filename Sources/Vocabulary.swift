@@ -87,6 +87,25 @@ struct Vocabulary {
         return result
     }
 
+    /// 把一條規則加到詞庫檔最後；已有同一行就不重複加。檔案不存在時先寫入範本。
+    /// 只在檔尾追加，不重寫既有內容。
+    static func append(rule: String, to file: URL) throws {
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let existing: String
+        do { existing = try String(contentsOf: file, encoding: .utf8) }
+        catch CocoaError.fileReadNoSuchFile {
+            try (starter + rule + "\n").write(to: file, atomically: true, encoding: .utf8)
+            return
+        }
+        let lines = existing.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+        guard !lines.contains(rule) else { return }
+        let addition = (existing.isEmpty || existing.hasSuffix("\n") ? "" : "\n") + rule + "\n"
+        let handle = try FileHandle(forWritingTo: file)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(addition.utf8))
+    }
+
     private static func isASCIIWordByte(_ byte: UInt8) -> Bool {
         (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte) || byte == 95
     }

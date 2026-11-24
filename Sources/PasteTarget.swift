@@ -37,28 +37,22 @@ struct PasteTarget {
         return range.location
     }
 
-    /// 讀取輸入框中從 `start` 開始、最多 `length` 個 UTF-16 單位的文字。只讀需要的範圍。
+    /// 讀取輸入框中從 `start` 開始、最多 `length` 個 UTF-16 單位的文字。
+    /// 只用「指定範圍的文字」介面；App 不支援時回傳 nil，不改讀整份內容。
     func text(from start: Int, length: Int) -> String? {
-        guard !isSecure, start >= 0, length > 0 else { return nil }
+        guard !isSecure, !IsSecureEventInputEnabled(), start >= 0, length > 0 else { return nil }
         var count: CFTypeRef?
-        var total = Int.max
-        if AXUIElementCopyAttributeValue(element, kAXNumberOfCharactersAttribute as CFString, &count) == .success,
-           let number = count as? Int { total = number }
+        guard AXUIElementCopyAttributeValue(element, kAXNumberOfCharactersAttribute as CFString, &count) == .success,
+              let total = count as? Int else { return nil }
         let available = min(length, total - start)
         guard available > 0 else { return nil }
         var range = CFRange(location: start, length: available)
-        if let parameter = AXValueCreate(.cfRange, &range) {
-            var result: CFTypeRef?
-            if AXUIElementCopyParameterizedAttributeValue(
-                element, kAXStringForRangeParameterizedAttribute as CFString, parameter, &result) == .success,
-               let string = result as? String { return string }
-        }
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success,
-              let full = value as? String else { return nil }
-        let whole = full as NSString
-        guard start < whole.length else { return nil }
-        return whole.substring(with: NSRange(location: start, length: min(available, whole.length - start)))
+        guard let parameter = AXValueCreate(.cfRange, &range) else { return nil }
+        var result: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(
+            element, kAXStringForRangeParameterizedAttribute as CFString, parameter, &result) == .success
+        else { return nil }
+        return result as? String
     }
 
     /// 游標前最多 `limit` 個字，空白與換行併成一個空格；讀不到時回傳空字串。
